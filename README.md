@@ -2,12 +2,15 @@ Exporter Exporter Extended Labels
 ----------------------------------
 # Background to this fork
 This is a fork of [exporter_exporter](https://github.com/QubitProducts/exporter_exporter) that 
-include additional support to add additional labels to the metrics fetched through the proxy. 
+include support to add additional labels to the metrics fetched through the proxy. 
 This label enrichment was proposed as 
 [PR](https://github.com/QubitProducts/exporter_exporter/pull/95)
 to the exporter_exporter project, but was considered out of scope. 
 This fork is compatible with exporter_exporter 
 [0.5.0](https://github.com/QubitProducts/exporter_exporter/releases/tag/v0.5.0).
+
+>If you just looking for the proxy functionallity please use the 
+>[exporter_exporter](https://github.com/QubitProducts/exporter_exporter) project.
 
 The documentation for the extended labels is in the end of this README in the section called 
 "Extended Labels".
