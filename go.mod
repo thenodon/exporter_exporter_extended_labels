@@ -1,4 +1,4 @@
-module github.com/QubitProducts/exporter_exporter
+module github.com/thenodon/exporter_exporter_extended_labels
 
 go 1.20
 
@@ -9,8 +9,8 @@ require (
 	github.com/prometheus/client_model v0.3.0
 	github.com/prometheus/common v0.39.0
 	github.com/sirupsen/logrus v1.9.0
-	golang.org/x/sync v0.1.0
-	golang.org/x/sys v0.4.0
+	golang.org/x/sync v0.3.0
+	golang.org/x/sys v0.11.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
