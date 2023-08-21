@@ -15,6 +15,7 @@ package main
 
 import (
 	"fmt"
+
 	"github.com/fsnotify/fsnotify"
 	log "github.com/sirupsen/logrus"
 )
