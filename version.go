@@ -33,5 +33,6 @@ func init() {
 }
 
 func versionStr() string {
-	return fmt.Sprintf("%s-%s (from %s, built by %s on %s)", Version, Revision, Branch, BuildUser, BuildDate)
+	return fmt.Sprintf("exporter_exporter_extended_labels, version %s\n", Version)
+	//return fmt.Sprintf("%s-%s (from %s, built by %s on %s)", Version, Revision, Branch, BuildUser, BuildDate)
 }
