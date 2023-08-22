@@ -1,5 +1,5 @@
 // nothing to see here, service control only applies to Windows
-// +build !windows
+//go:build !windows
 
 package main
 
