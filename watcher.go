@@ -46,6 +46,7 @@ func watch(cfg *moduleConfig) {
 		}
 	}()
 
+	// Add the file path to the watcher
 	err = watcher.Add(*cfg.HTTP.ExtendLabelsPath)
 	if err != nil {
 		log.Fatal(err)
