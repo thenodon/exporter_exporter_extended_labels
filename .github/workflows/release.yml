@@ -31,4 +31,4 @@ jobs:
         goversion: "1.20"
         ldflags: -X main.Version=${{ env.RELEASE_VERSION }}
         binary_name: exporter_exporter_el-${{ env.RELEASE_VERSION }}.${{ matrix.goos }}.${{ matrix.goarch }}
-        extra_files: COPYING README.md
+        extra_files: LICENSE README.md
