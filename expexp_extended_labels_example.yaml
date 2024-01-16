@@ -5,6 +5,6 @@ modules:
     http:
       port: 9116
       path: /snmp
-      extend_labels: true
-      extend_labels_path: ./extended_labels/interfaces.yaml
-      extend_labels_target_url_identity: target
+      extended_labels: true
+      extended_labels_path: extended_labels/interfaces.yaml
+      extended_labels_target_url_identity: target

@@ -10,7 +10,7 @@ to the exporter_exporter project, but was considered out of scope.
 This fork is compatible with exporter_exporter 
 [0.5.0](https://github.com/QubitProducts/exporter_exporter/releases/tag/v0.5.0).
 
->If you just looking for the proxy functionallity please use the 
+>If you're just looking for the proxy functionality please use the 
 >[exporter_exporter](https://github.com/QubitProducts/exporter_exporter) project.
 
 The documentation for the extended labels is in the end of this README in the section called 
@@ -329,16 +329,17 @@ modules:
       port: 9116
       path: /snmp
       # Enable extended labels
-      label_extend: true
+      extended_labels: true
       # The url parameter identify the target 
-      label_extend_target_url_identity: target
+      extended_labels_target_url_identity: target
       # The path to the file for the specific extended label configuration 
-      label_extend_path: /tmp/interfaces.yaml
+      extended_labels_path: extended_labels/interfaces.yaml
+
 ```
-`label_extend` set to true just enable the feature for the module. 
-The second , `label_extend_target_url_identity`, define what target the extended labels 
+`extended_labels` set to true just enable the feature for the module. 
+The second , `extended_labels_target_url_identity`, define what target the extended labels 
 should be match against. For the snmp-exporter the url parameter target define the host that 
-snmp should be executed against. The third, `label_extend_path`, define the path to the 
+snmp should be executed against. The third, `extended_labels_path`, define the path to the 
 extended labels configuration, typical created by automation, for example extract lldp based 
 neighbor information from Cisco Prime that result in labels as trunk and neighbor.
 
@@ -381,7 +382,7 @@ targets:
 ```
 The `targets` attribute include a map of targets, in the above example a host name. 
 The entry is matched against the value of the url query parameter defined by 
-`label_extend_target_url_identity`. 
+`extended_labels_target_url_identity`. 
 So if a metrics has a label named `ifIndex`, defined by `label_key_name`, 
 the logic will evaluate against what is configured in the `extended_labels`. 
 First it will validate if this is only applicable to specific named metrics, 
