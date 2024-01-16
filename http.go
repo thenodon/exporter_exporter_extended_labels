@@ -189,7 +189,7 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 				continue
 			}
 
-			err = cfg.manageExtendedLabels(mf, labelKeyNames, out)
+			err = cfg.manageExtendedLabels(&mf, labelKeyNames, out)
 			if err != nil {
 				return &VerifyError{"Failed to extend labels on metrics from proxied server", err}
 
@@ -212,7 +212,7 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 	}
 }
 
-func (cfg moduleConfig) manageExtendedLabels(mf dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
+func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
 
 	var labelIndexMap map[string]*MetricLabelMeta
 
@@ -266,7 +266,7 @@ func (cfg moduleConfig) manageExtendedLabels(mf dto.MetricFamily, labelKeyNames 
 		}
 	}
 
-	_, err := expfmt.MetricFamilyToText(out, &mf)
+	_, err := expfmt.MetricFamilyToText(out, mf)
 	if err != nil {
 		if err != nil {
 			proxyMalformedCount.WithLabelValues(cfg.name).Inc()
