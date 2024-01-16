@@ -10,8 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # goos: [ linux, darwin,  windows]
-        goos: [ linux,  windows]
+        goos: [ linux, darwin,  windows]
         goarch: [ "arm64", "amd64" ]
         exclude:
           - goarch: arm64
@@ -30,5 +29,5 @@ jobs:
         goarch: ${{ matrix.goarch }}
         goversion: "1.20"
         ldflags: -X main.Version=${{ env.RELEASE_VERSION }}
-        binary_name: exporter_exporter_el-${{ env.RELEASE_VERSION }}.${{ matrix.goos }}.${{ matrix.goarch }}
+        binary_name: exporter_exporter_extended_labels-${{ env.RELEASE_VERSION }}.${{ matrix.goos }}.${{ matrix.goarch }}
         extra_files: LICENSE README.md
