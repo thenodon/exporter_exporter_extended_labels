@@ -291,10 +291,8 @@ func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames
 
 	_, err := expfmt.MetricFamilyToText(out, mf)
 	if err != nil {
-		if err != nil {
-			proxyMalformedCount.WithLabelValues(cfg.name).Inc()
-			return &VerifyError{"Failed to inject labels from proxied server", err}
-		}
+		proxyMalformedCount.WithLabelValues(cfg.name).Inc()
+		return &VerifyError{"Failed to inject labels from proxied server", err}
 	}
 	return nil
 }
