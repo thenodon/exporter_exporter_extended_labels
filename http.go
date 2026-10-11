@@ -241,21 +241,28 @@ func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames
 						defaultAddLabels := matchLabel.DefaultLabelPairs
 
 						// check if metric name matcher is true
-						if !matchMetricsName(mf.GetName(), matchLabel.MetricMatch) {
+						if !matchMetricsName(mf.GetName(), &matchLabel) {
 							continue
 						}
 
-						for matchKey, addLabels := range matchLabel.MatchLabelValues {
+						metricLabelValue := matchLabelPair.GetValue()
 
-							// check if the metric label value match match_label_key_values
-							if !(matchLabelPair.GetValue() == matchKey || "*" == matchKey) {
-								continue
-							}
-
+						// Fast path: apply exact-value rule in O(1) via map lookup.
+						if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
 							if addLabels != nil {
 								addExtendedLabels(addLabels.LabelPair, metric)
 							}
+							if defaultAddLabels != nil {
+								addExtendedLabels(defaultAddLabels, metric)
+							}
+						}
 
+						// Wildcard rule is an independent match and should still be
+						// evaluated even if the exact-value rule matched.
+						if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
+							if addLabels != nil {
+								addExtendedLabels(addLabels.LabelPair, metric)
+							}
 							if defaultAddLabels != nil {
 								addExtendedLabels(defaultAddLabels, metric)
 							}
@@ -288,11 +295,18 @@ func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
 	}
 }
 
-func matchMetricsName(name string, matchMetricsName *string) bool {
-	if matchMetricsName == nil {
+func matchMetricsName(name string, matchLabel *MatchLabel) bool {
+	if matchLabel == nil || matchLabel.MetricMatch == nil {
 		return true
 	}
-	match, err := regexp.MatchString(*matchMetricsName, name)
+
+	if matchLabel.metricMatchRegexp != nil {
+		return matchLabel.metricMatchRegexp.MatchString(name)
+	}
+
+	// Fallback for manually-constructed MatchLabel values that were not passed
+	// through config-time regex precompilation.
+	match, err := regexp.MatchString(*matchLabel.MetricMatch, name)
 	if err != nil {
 		// log
 		return false
@@ -300,10 +314,11 @@ func matchMetricsName(name string, matchMetricsName *string) bool {
 	return match
 }
 
+// getTargetMatch returns the ExtendedLabelTarget configuration for the target specified in the request URL query parameters.
 func getTargetMatch(request *http.Request, cfg moduleConfig) *ExtendedLabelTarget {
 	target := request.URL.Query().Get(*cfg.HTTP.ExtendLabelsTargetURLIdentity)
-	kalle := cfg.HTTP.LabelExtendConfig.Targets[target]
-	return &kalle
+	targetConfig := cfg.HTTP.LabelExtendConfig.Targets[target]
+	return &targetConfig
 }
 
 func resolveLabels(metric *dto.Metric, ingestor *ExtendedLabelTarget) map[string]*MetricLabelMeta {

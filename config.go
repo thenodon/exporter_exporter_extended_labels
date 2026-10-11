@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"regexp"
 	"time"
 
 	yaml "gopkg.in/yaml.v3"
@@ -91,6 +92,7 @@ type MatchLabel struct {
 	MetricMatch       *string                `yaml:"metric_match"`
 	MatchLabelValues  map[string]*LabelPairs `yaml:"match_label_key_values"`
 	DefaultLabelPairs map[string]string      `yaml:"default_label_pairs"`
+	metricMatchRegexp *regexp.Regexp
 }
 
 type LabelPairs struct {
@@ -98,7 +100,7 @@ type LabelPairs struct {
 }
 
 func (ee ExtendedLabelTarget) getMatchKeys() []string {
-	var keys = make([]string, len(ee.Labels))
+	keys := make([]string, 0, len(ee.Labels))
 	for _, key := range ee.Labels {
 		keys = append(keys, key.MatchLabelKey)
 	}
@@ -251,7 +253,32 @@ func (c httpConfig) getExtendedLabelConfig() (*ExtendedLabelsConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := config.compileMetricMatchers(); err != nil {
+		return nil, err
+	}
 	return &config, nil
+}
+
+func (c *ExtendedLabelsConfig) compileMetricMatchers() error {
+	for targetName, target := range c.Targets {
+		for labelIndex := range target.Labels {
+			label := &target.Labels[labelIndex]
+			for matchLabelIndex := range label.MatchLabels {
+				matchLabel := &label.MatchLabels[matchLabelIndex]
+				if matchLabel.MetricMatch == nil {
+					continue
+				}
+				compiledRegex, err := regexp.Compile(*matchLabel.MetricMatch)
+				if err != nil {
+					return fmt.Errorf("invalid metric_match regex for target %q label_key_name %q: %w", targetName, label.MatchLabelKey, err)
+				}
+				matchLabel.metricMatchRegexp = compiledRegex
+			}
+		}
+		c.Targets[targetName] = target
+	}
+
+	return nil
 }
 
 func (c httpConfig) getTLSConfig() (*tls.Config, error) {
