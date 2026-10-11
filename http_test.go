@@ -311,6 +311,331 @@ func TestManageExtendedLabelsAppliesWildcardRule(t *testing.T) {
 	}
 }
 
+func TestManageExtendedLabelsAddsDefaultLabelsOnceWhenExactAndWildcardMatch(t *testing.T) {
+	// This test ensures default labels are appended once per MatchLabel even
+	// when both the exact-value and wildcard rules match the same metric.
+	metricName := "node_memory_MemAvailable_bytes"
+	instanceName := "instance"
+	instanceValue := "node-1"
+	metricValue := 42.0
+	metricType := dto.MetricType_GAUGE
+	metric := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: &instanceName, Value: &instanceValue}},
+		Gauge: &dto.Gauge{Value: &metricValue},
+	}
+	mf := &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: []*dto.Metric{metric},
+	}
+
+	pattern := "^node_.*$"
+	target := &ExtendedLabelTarget{Labels: []ExtendedLabel{{
+		MatchLabelKey: "instance",
+		MatchLabels: []MatchLabel{{
+			MetricMatch: &pattern,
+			MatchLabelValues: map[string]*LabelPairs{
+				instanceValue: {LabelPair: map[string]string{"region": "eu-west-1"}},
+				"*":           {LabelPair: map[string]string{"scope": "all"}},
+			},
+			DefaultLabelPairs: map[string]string{"source": "proxy"},
+		}},
+	}}}
+
+	var out bytes.Buffer
+	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
+		t.Fatalf("manageExtendedLabels returned error: %v", err)
+	}
+
+	sourceLabelCount := 0
+	labels := map[string]string{}
+	for _, label := range metric.Label {
+		labels[label.GetName()] = label.GetValue()
+		if label.GetName() == "source" {
+			sourceLabelCount++
+		}
+	}
+
+	if labels["region"] != "eu-west-1" {
+		t.Fatalf("expected exact-match label to be added, got %#v", labels)
+	}
+	if labels["scope"] != "all" {
+		t.Fatalf("expected wildcard label to be added, got %#v", labels)
+	}
+	if labels["source"] != "proxy" {
+		t.Fatalf("expected default label to be added, got %#v", labels)
+	}
+	if sourceLabelCount != 1 {
+		t.Fatalf("expected default label to be added once, got %d occurrences in %#v", sourceLabelCount, metric.Label)
+	}
+}
+
+func TestManageExtendedLabelsHandlesMixedMetricLabelShapes(t *testing.T) {
+	// This test validates the pre-bound label-index optimization safety: if the
+	// first metric defines the label used for binding, later metrics with a
+	// different label shape must not panic and should still be processed safely.
+	metricName := "ifAdminStatus"
+	metricType := dto.MetricType_GAUGE
+	matchLabelName := "ifDescr"
+	firstLabelValue := "xe-0/2/3"
+	secondLabelName := "otherLabel"
+	secondLabelValue := "no-match"
+	firstMetricValue := 1.0
+	secondMetricValue := 2.0
+
+	firstMetric := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: &matchLabelName, Value: &firstLabelValue}},
+		Gauge: &dto.Gauge{Value: &firstMetricValue},
+	}
+	secondMetric := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: &secondLabelName, Value: &secondLabelValue}},
+		Gauge: &dto.Gauge{Value: &secondMetricValue},
+	}
+	mf := &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: []*dto.Metric{firstMetric, secondMetric},
+	}
+
+	pattern := "ifAdminStatus"
+	target := &ExtendedLabelTarget{Labels: []ExtendedLabel{{
+		MatchLabelKey: matchLabelName,
+		MatchLabels: []MatchLabel{{
+			MetricMatch: &pattern,
+			MatchLabelValues: map[string]*LabelPairs{
+				firstLabelValue: {LabelPair: map[string]string{"discovery": "CDP"}},
+			},
+		}},
+	}}}
+
+	var out bytes.Buffer
+	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
+		t.Fatalf("manageExtendedLabels returned error: %v", err)
+	}
+
+	firstLabels := map[string]string{}
+	for _, label := range firstMetric.Label {
+		firstLabels[label.GetName()] = label.GetValue()
+	}
+	if firstLabels["discovery"] != "CDP" {
+		t.Fatalf("expected first metric to be extended, got %#v", firstLabels)
+	}
+
+	for _, label := range secondMetric.Label {
+		if label.GetName() == "discovery" {
+			t.Fatalf("expected second metric to remain unextended, got %#v", secondMetric.Label)
+		}
+	}
+}
+
+func TestManageExtendedLabelsHandlesNilLabelSliceAfterBinding(t *testing.T) {
+	// This test ensures that a nil label slice on a later metric does not panic
+	// after indices were bound from the first metric.
+	metricName := "ifAdminStatus"
+	metricType := dto.MetricType_GAUGE
+	matchLabelName := "ifDescr"
+	firstLabelValue := "xe-0/2/3"
+	firstMetricValue := 1.0
+	secondMetricValue := 2.0
+
+	firstMetric := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: &matchLabelName, Value: &firstLabelValue}},
+		Gauge: &dto.Gauge{Value: &firstMetricValue},
+	}
+	secondMetric := &dto.Metric{
+		Label: nil,
+		Gauge: &dto.Gauge{Value: &secondMetricValue},
+	}
+	mf := &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: []*dto.Metric{firstMetric, secondMetric},
+	}
+
+	pattern := "ifAdminStatus"
+	target := &ExtendedLabelTarget{Labels: []ExtendedLabel{{
+		MatchLabelKey: matchLabelName,
+		MatchLabels: []MatchLabel{{
+			MetricMatch: &pattern,
+			MatchLabelValues: map[string]*LabelPairs{
+				firstLabelValue: {LabelPair: map[string]string{"discovery": "CDP"}},
+			},
+		}},
+	}}}
+
+	var out bytes.Buffer
+	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
+		t.Fatalf("manageExtendedLabels returned error: %v", err)
+	}
+
+	firstLabels := map[string]string{}
+	for _, label := range firstMetric.Label {
+		firstLabels[label.GetName()] = label.GetValue()
+	}
+	if firstLabels["discovery"] != "CDP" {
+		t.Fatalf("expected first metric to be extended, got %#v", firstLabels)
+	}
+	if len(secondMetric.Label) != 0 {
+		t.Fatalf("expected second metric labels to stay empty, got %#v", secondMetric.Label)
+	}
+}
+
+func TestManageExtendedLabelsBindsFromFirstUsableMetric(t *testing.T) {
+	// This test verifies that binding is delayed until the first metric with
+	// labels is found. A nil-label first metric should no longer stop processing.
+	metricName := "ifAdminStatus"
+	metricType := dto.MetricType_GAUGE
+	matchLabelName := "ifDescr"
+	matchLabelValue := "xe-0/2/3"
+	emptyMetricValue := 1.0
+	matchingMetricValue := 2.0
+
+	firstMetric := &dto.Metric{
+		Label: nil,
+		Gauge: &dto.Gauge{Value: &emptyMetricValue},
+	}
+	secondMetric := &dto.Metric{
+		Label: []*dto.LabelPair{{Name: &matchLabelName, Value: &matchLabelValue}},
+		Gauge: &dto.Gauge{Value: &matchingMetricValue},
+	}
+	mf := &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: []*dto.Metric{firstMetric, secondMetric},
+	}
+
+	pattern := "ifAdminStatus"
+	target := &ExtendedLabelTarget{Labels: []ExtendedLabel{{
+		MatchLabelKey: matchLabelName,
+		MatchLabels: []MatchLabel{{
+			MetricMatch: &pattern,
+			MatchLabelValues: map[string]*LabelPairs{
+				matchLabelValue: {LabelPair: map[string]string{"discovery": "CDP"}},
+			},
+		}},
+	}}}
+
+	var out bytes.Buffer
+	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
+		t.Fatalf("manageExtendedLabels returned error: %v", err)
+	}
+
+	labels := map[string]string{}
+	for _, label := range secondMetric.Label {
+		labels[label.GetName()] = label.GetValue()
+	}
+	if labels["discovery"] != "CDP" {
+		t.Fatalf("expected second metric to be extended, got %#v", labels)
+	}
+}
+
+func BenchmarkManageExtendedLabels(b *testing.B) {
+	benchmarkCases := []struct {
+		name          string
+		metricsCount  int
+		matchKeyCount int
+	}{
+		{name: "metrics-100-match-keys-10", metricsCount: 100, matchKeyCount: 10},
+		{name: "metrics-1000-match-keys-10", metricsCount: 1000, matchKeyCount: 10},
+	}
+
+	for _, benchCase := range benchmarkCases {
+		b.Run(benchCase.name, func(b *testing.B) {
+			baseMetricFamily, labelTarget := buildManageExtendedLabelsBenchmarkFixture(benchCase.metricsCount, benchCase.matchKeyCount)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				// Benchmark only the function under test. Cloning is benchmark setup
+				// work to provide a fresh mutable input and is intentionally excluded.
+				b.StopTimer()
+				metricFamily := cloneMetricFamilyForBenchmark(baseMetricFamily)
+				var out bytes.Buffer
+				b.StartTimer()
+				if err := (&moduleConfig{}).manageExtendedLabels(metricFamily, labelTarget, &out); err != nil {
+					b.Fatalf("manageExtendedLabels returned error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func buildManageExtendedLabelsBenchmarkFixture(metricsCount int, matchKeyCount int) (*dto.MetricFamily, *ExtendedLabelTarget) {
+	metricName := "ifAdminStatus"
+	matchLabelName := "ifDescr"
+	metricType := dto.MetricType_GAUGE
+
+	metrics := make([]*dto.Metric, metricsCount)
+	for i := 0; i < metricsCount; i++ {
+		labelValue := fmt.Sprintf("xe-0/2/%d", i%matchKeyCount)
+		metricValue := float64(i)
+		metrics[i] = &dto.Metric{
+			Label: []*dto.LabelPair{{Name: &matchLabelName, Value: &labelValue}},
+			Gauge: &dto.Gauge{Value: &metricValue},
+		}
+	}
+
+	matchLabelValues := make(map[string]*LabelPairs, matchKeyCount+1)
+	for i := 0; i < matchKeyCount; i++ {
+		interfaceName := fmt.Sprintf("xe-0/2/%d", i)
+		matchLabelValues[interfaceName] = &LabelPairs{
+			LabelPair: map[string]string{
+				"neighbor":         "sw1.foo.com",
+				"remote_interface": "xe-0/1/1",
+			},
+		}
+	}
+	matchLabelValues["*"] = &LabelPairs{
+		LabelPair: map[string]string{
+			"scope": "all",
+		},
+	}
+
+	metricMatchPattern := "^ifAdminStatus$"
+	targets := map[string]ExtendedLabelTarget{
+		"device-a": {
+			Labels: []ExtendedLabel{{
+				MatchLabelKey: matchLabelName,
+				MatchLabels: []MatchLabel{{
+					MetricMatch:       &metricMatchPattern,
+					MatchLabelValues:  matchLabelValues,
+					DefaultLabelPairs: map[string]string{"discovery": "CDP"},
+				}},
+			}},
+		},
+	}
+
+	labelConfig := &ExtendedLabelsConfig{Targets: targets}
+	if err := labelConfig.compileMetricMatchers(); err != nil {
+		panic(fmt.Sprintf("failed to compile benchmark matchers: %v", err))
+	}
+	target := labelConfig.Targets["device-a"]
+	return &dto.MetricFamily{Name: &metricName, Type: &metricType, Metric: metrics}, &target
+}
+
+func cloneMetricFamilyForBenchmark(source *dto.MetricFamily) *dto.MetricFamily {
+	metricType := source.GetType()
+	metricName := source.GetName()
+	cloned := &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: make([]*dto.Metric, len(source.Metric)),
+	}
+
+	for index, originalMetric := range source.Metric {
+		metricCopy := *originalMetric
+		labelsCopy := make([]*dto.LabelPair, len(originalMetric.Label))
+		for labelIndex, originalLabel := range originalMetric.Label {
+			name := originalLabel.GetName()
+			value := originalLabel.GetValue()
+			labelsCopy[labelIndex] = &dto.LabelPair{Name: &name, Value: &value}
+		}
+		metricCopy.Label = labelsCopy
+		cloned.Metric[index] = &metricCopy
+	}
+
+	return cloned
+}
+
 func BenchmarkReverseProxyHandler(b *testing.B) {
 	body := genRandomMetricsResponse(10000, 10)
 

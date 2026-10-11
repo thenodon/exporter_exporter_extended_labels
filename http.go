@@ -215,58 +215,74 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
 
 	var labelIndexMap map[string]*MetricLabelMeta
+	// Build once per metric family: each entry binds a configured label rule to
+	// the resolved label index from the first usable metric, so the hot loop can
+	// avoid repeated map lookups by MatchLabelKey.
+	boundLabels := make([]boundExtendedLabel, 0, len(labelKeyNames.Labels))
 
-	for index, metric := range mf.Metric {
-		if index == 0 && metric.Label == nil {
-			//continue
-			break
-		}
+	for _, metric := range mf.Metric {
+		// Delay binding until we find a metric that actually has labels.
+		// This avoids bailing out early when the first metric has nil labels.
+		if labelIndexMap == nil {
+			if metric.Label == nil {
+				continue
+			}
 
-		// Check the first metric of all the same type
-		if index == 0 {
 			// return the label map indicate if the label_key_names exist in the metrics
 			labelIndexMap = resolveLabels(metric, labelKeyNames)
+			for _, extendedLabel := range labelKeyNames.Labels {
+				meta, found := labelIndexMap[extendedLabel.MatchLabelKey]
+				if !found || !meta.LabelExist {
+					continue
+				}
+				boundLabels = append(boundLabels, boundExtendedLabel{
+					labelIndex:  meta.LabelIndex,
+					matchLabels: extendedLabel.MatchLabels,
+				})
+			}
 		}
 
-		// For every label_key_name
-		for _, extendedLabel := range labelKeyNames.Labels {
+		// For every pre-bound label rule, apply matching against the current metric.
+		for _, bound := range boundLabels {
+			// Label indexes are resolved from the first metric of the family.
+			// Guarding the index avoids panics if later metrics have different label shapes.
+			if bound.labelIndex >= len(metric.Label) {
+				continue
+			}
+			matchLabelPair := metric.Label[bound.labelIndex]
+			if matchLabelPair != nil {
+				for _, matchLabel := range bound.matchLabels {
+					defaultAddLabels := matchLabel.DefaultLabelPairs
 
-			// Evaluate the first row of the mf.Metric to check if label exist and index in metric.Label
-			if labelIndexMap[extendedLabel.MatchLabelKey].LabelExist {
-				var matchLabelPair *dto.LabelPair
-				// if the label exists in the metric
-				matchLabelPair = metric.Label[labelIndexMap[extendedLabel.MatchLabelKey].LabelIndex]
-				if matchLabelPair != nil {
-					for _, matchLabel := range extendedLabel.MatchLabels {
-						defaultAddLabels := matchLabel.DefaultLabelPairs
+					// check if metric name matcher is true
+					if !matchMetricsName(mf.GetName(), &matchLabel) {
+						continue
+					}
 
-						// check if metric name matcher is true
-						if !matchMetricsName(mf.GetName(), &matchLabel) {
-							continue
+					metricLabelValue := matchLabelPair.GetValue()
+					matchedAnyRule := false
+
+					// Fast path: apply exact-value rule in O(1) via map lookup.
+					if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
+						matchedAnyRule = true
+						if addLabels != nil {
+							addExtendedLabels(addLabels.LabelPair, metric)
 						}
+					}
 
-						metricLabelValue := matchLabelPair.GetValue()
-
-						// Fast path: apply exact-value rule in O(1) via map lookup.
-						if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
-							if addLabels != nil {
-								addExtendedLabels(addLabels.LabelPair, metric)
-							}
-							if defaultAddLabels != nil {
-								addExtendedLabels(defaultAddLabels, metric)
-							}
+					// Wildcard rule is an independent match and should still be
+					// evaluated even if the exact-value rule matched.
+					if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
+						matchedAnyRule = true
+						if addLabels != nil {
+							addExtendedLabels(addLabels.LabelPair, metric)
 						}
+					}
 
-						// Wildcard rule is an independent match and should still be
-						// evaluated even if the exact-value rule matched.
-						if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
-							if addLabels != nil {
-								addExtendedLabels(addLabels.LabelPair, metric)
-							}
-							if defaultAddLabels != nil {
-								addExtendedLabels(defaultAddLabels, metric)
-							}
-						}
+					// Default labels are tied to this MatchLabel and should be
+					// appended at most once when any rule (exact or wildcard) matched.
+					if matchedAnyRule && defaultAddLabels != nil {
+						addExtendedLabels(defaultAddLabels, metric)
 					}
 				}
 			}
@@ -284,6 +300,18 @@ func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames
 }
 
 func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
+	// Reserve space once for this whole batch of labels to avoid repeated
+	// reallocations while appending one label at a time.
+	needed := len(defaultAddLabels)
+	if needed == 0 {
+		return
+	}
+	if available := cap(metric.Label) - len(metric.Label); available < needed {
+		grown := make([]*dto.LabelPair, len(metric.Label), len(metric.Label)+needed)
+		copy(grown, metric.Label)
+		metric.Label = grown
+	}
+
 	for addLabelKey, addLabelValue := range defaultAddLabels {
 		k := addLabelKey
 		v := addLabelValue
@@ -343,6 +371,11 @@ func resolveLabels(metric *dto.Metric, ingestor *ExtendedLabelTarget) map[string
 type MetricLabelMeta struct {
 	LabelIndex int
 	LabelExist bool
+}
+
+type boundExtendedLabel struct {
+	labelIndex  int
+	matchLabels []MatchLabel
 }
 
 func (cfg moduleConfig) getReverseProxyErrorHandlerFunc() func(http.ResponseWriter, *http.Request, error) {
