@@ -622,7 +622,14 @@ func cloneMetricFamilyForBenchmark(source *dto.MetricFamily) *dto.MetricFamily {
 	}
 
 	for index, originalMetric := range source.Metric {
-		metricCopy := *originalMetric
+		metricCopy := &dto.Metric{
+			Gauge:       originalMetric.Gauge,
+			Counter:     originalMetric.Counter,
+			Summary:     originalMetric.Summary,
+			Untyped:     originalMetric.Untyped,
+			Histogram:   originalMetric.Histogram,
+			TimestampMs: originalMetric.TimestampMs,
+		}
 		labelsCopy := make([]*dto.LabelPair, len(originalMetric.Label))
 		for labelIndex, originalLabel := range originalMetric.Label {
 			name := originalLabel.GetName()
@@ -630,7 +637,7 @@ func cloneMetricFamilyForBenchmark(source *dto.MetricFamily) *dto.MetricFamily {
 			labelsCopy[labelIndex] = &dto.LabelPair{Name: &name, Value: &value}
 		}
 		metricCopy.Label = labelsCopy
-		cloned.Metric[index] = &metricCopy
+		cloned.Metric[index] = metricCopy
 	}
 
 	return cloned
