@@ -212,89 +212,129 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 	}
 }
 
-func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
-
-	var labelIndexMap map[string]*MetricLabelMeta
-	// Build once per metric family: each entry binds a configured label rule to
-	// the resolved label index from the first usable metric, so the hot loop can
-	// avoid repeated map lookups by MatchLabelKey.
-	boundLabels := make([]boundExtendedLabel, 0, len(labelKeyNames.Labels))
-
+func (cfg moduleConfig) manageExtendedLabels(
+	mf *dto.MetricFamily,
+	labelKeyNames *ExtendedLabelTarget,
+	out *bytes.Buffer,
+) error {
+	// Bind and filter rules once per metric family, then apply to each metric.
+	boundLabels := bindExtendedLabelsForFamily(
+		mf.Metric,
+		labelKeyNames,
+		mf.GetName(),
+	)
 	for _, metric := range mf.Metric {
-		// Delay binding until we find a metric that actually has labels.
-		// This avoids bailing out early when the first metric has nil labels.
-		if labelIndexMap == nil {
-			if metric.Label == nil {
-				continue
-			}
-
-			// return the label map indicate if the label_key_names exist in the metrics
-			labelIndexMap = resolveLabels(metric, labelKeyNames)
-			for _, extendedLabel := range labelKeyNames.Labels {
-				meta, found := labelIndexMap[extendedLabel.MatchLabelKey]
-				if !found || !meta.LabelExist {
-					continue
-				}
-				boundLabels = append(boundLabels, boundExtendedLabel{
-					labelIndex:  meta.LabelIndex,
-					matchLabels: extendedLabel.MatchLabels,
-				})
-			}
-		}
-
-		// For every pre-bound label rule, apply matching against the current metric.
-		for _, bound := range boundLabels {
-			// Label indexes are resolved from the first metric of the family.
-			// Guarding the index avoids panics if later metrics have different label shapes.
-			if bound.labelIndex >= len(metric.Label) {
-				continue
-			}
-			matchLabelPair := metric.Label[bound.labelIndex]
-			if matchLabelPair != nil {
-				for _, matchLabel := range bound.matchLabels {
-					defaultAddLabels := matchLabel.DefaultLabelPairs
-
-					// check if metric name matcher is true
-					if !matchMetricsName(mf.GetName(), &matchLabel) {
-						continue
-					}
-
-					metricLabelValue := matchLabelPair.GetValue()
-					matchedAnyRule := false
-
-					// Fast path: apply exact-value rule in O(1) via map lookup.
-					if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
-						matchedAnyRule = true
-						if addLabels != nil {
-							addExtendedLabels(addLabels.LabelPair, metric)
-						}
-					}
-
-					// Wildcard rule is an independent match and should still be
-					// evaluated even if the exact-value rule matched.
-					if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
-						matchedAnyRule = true
-						if addLabels != nil {
-							addExtendedLabels(addLabels.LabelPair, metric)
-						}
-					}
-
-					// Default labels are tied to this MatchLabel and should be
-					// appended at most once when any rule (exact or wildcard) matched.
-					if matchedAnyRule && defaultAddLabels != nil {
-						addExtendedLabels(defaultAddLabels, metric)
-					}
-				}
-			}
-		}
+		applyBoundLabelsToMetric(metric, boundLabels)
 	}
 
+	// Serialize the complete metric family.
 	_, err := expfmt.MetricFamilyToText(out, mf)
 	if err != nil {
 		proxyMalformedCount.WithLabelValues(cfg.name).Inc()
-		return &VerifyError{"Failed to inject labels from proxied server", err}
+		return &VerifyError{
+			"Failed to inject labels from proxied server",
+			err,
+		}
+	}
+
+	return nil
+}
+
+func bindExtendedLabelsForFamily(
+	metrics []*dto.Metric,
+	labelKeyNames *ExtendedLabelTarget,
+	metricName string,
+) []boundExtendedLabel {
+	firstMetricWithLabels := findFirstMetricWithLabels(metrics)
+	if firstMetricWithLabels == nil {
+		return nil
+	}
+
+	labelIndexMap := resolveLabels(firstMetricWithLabels, labelKeyNames)
+	boundLabels := make([]boundExtendedLabel, 0, len(labelKeyNames.Labels))
+
+	for _, extendedLabel := range labelKeyNames.Labels {
+		meta, found := labelIndexMap[extendedLabel.MatchLabelKey]
+		if !found || !meta.LabelExist {
+			continue
+		}
+
+		matchingRules := filterRulesForMetricName(metricName, extendedLabel.MatchLabels)
+		if len(matchingRules) == 0 {
+			continue
+		}
+
+		boundLabels = append(boundLabels, boundExtendedLabel{
+			labelIndex:  meta.LabelIndex,
+			matchLabels: matchingRules,
+		})
+	}
+
+	return boundLabels
+}
+
+func findFirstMetricWithLabels(metrics []*dto.Metric) *dto.Metric {
+	for _, metric := range metrics {
+		if metric.Label != nil {
+			return metric
+		}
 	}
 	return nil
+}
+
+func filterRulesForMetricName(metricName string, rules []MatchLabel) []MatchLabel {
+	matchingRules := make([]MatchLabel, 0, len(rules))
+	for _, matchLabel := range rules {
+		if matchMetricsName(metricName, &matchLabel) {
+			matchingRules = append(matchingRules, matchLabel)
+		}
+	}
+	return matchingRules
+}
+
+func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLabel) {
+	for _, bound := range boundLabels {
+		// Guard against different label slice lengths.
+		if bound.labelIndex >= len(metric.Label) {
+			continue
+		}
+
+		matchLabelPair := metric.Label[bound.labelIndex]
+		if matchLabelPair == nil {
+			continue
+		}
+
+		metricLabelValue := matchLabelPair.GetValue()
+		for _, matchLabel := range bound.matchLabels {
+			applyMatchLabelRules(metric, metricLabelValue, matchLabel)
+		}
+	}
+}
+
+func applyMatchLabelRules(metric *dto.Metric, metricLabelValue string, matchLabel MatchLabel) {
+	defaultAddLabels := matchLabel.DefaultLabelPairs
+	matchedAnyRule := false
+
+	// Exact-value match using O(1) map lookup.
+	if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
+		matchedAnyRule = true
+		if addLabels != nil {
+			addExtendedLabels(addLabels.LabelPair, metric)
+		}
+	}
+
+	// Wildcard is independent of the exact match.
+	if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
+		matchedAnyRule = true
+		if addLabels != nil {
+			addExtendedLabels(addLabels.LabelPair, metric)
+		}
+	}
+
+	// Add defaults once if any rule matched.
+	if matchedAnyRule && defaultAddLabels != nil {
+		addExtendedLabels(defaultAddLabels, metric)
+	}
 }
 
 func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
