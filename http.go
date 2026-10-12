@@ -315,35 +315,104 @@ func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLab
 
 // applyMatchLabelRules applies the label extension rules for a specific metric label value, adding any matching labels
 // to the metric.
-func applyMatchLabelRules(metric *dto.Metric, metricLabelValue string, matchLabel MatchLabel) {
-	defaultAddLabels := matchLabel.DefaultLabelPairs
+
+func applyMatchLabelRules(
+	metric *dto.Metric,
+	metricLabelValue string,
+	matchLabel MatchLabel,
+) {
+	var exactLabels []*dto.LabelPair
+	var wildcardLabels []*dto.LabelPair
+	var defaultLabels []*dto.LabelPair
+
 	matchedAnyRule := false
 
-	// Exact-value match using O(1) map lookup.
+	// Exact-value match.
 	if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
 		matchedAnyRule = true
+
 		if addLabels != nil {
-			addExtendedLabels(addLabels.LabelPair, metric)
+			exactLabels = addLabels.compiledLabelPairs
 		}
 	}
 
-	// Wildcard is independent of the exact match.
+	// Wildcard match is independent of the exact match.
 	if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
 		matchedAnyRule = true
+
 		if addLabels != nil {
-			addExtendedLabels(addLabels.LabelPair, metric)
+			wildcardLabels = addLabels.compiledLabelPairs
 		}
 	}
 
-	// Add defaults once if any rule matched.
-	if matchedAnyRule && defaultAddLabels != nil {
-		addExtendedLabels(defaultAddLabels, metric)
+	// Defaults are added once if either rule matched.
+	if matchedAnyRule {
+		defaultLabels = matchLabel.compiledDefaultLabelPairs
 	}
+
+	// Calculate total capacity needed.
+	needed := len(exactLabels) +
+		len(wildcardLabels) +
+		len(defaultLabels)
+
+	if needed == 0 {
+		return
+	}
+
+	// Reserve capacity once for all three groups.
+	if cap(metric.Label)-len(metric.Label) < needed {
+		grown := make(
+			[]*dto.LabelPair,
+			len(metric.Label),
+			len(metric.Label)+needed,
+		)
+
+		copy(grown, metric.Label)
+		metric.Label = grown
+	}
+
+	// Append references to the compiled label pairs.
+	addExtendedLabels(exactLabels, metric)
+	addExtendedLabels(wildcardLabels, metric)
+	addExtendedLabels(defaultLabels, metric)
 }
+
+//func applyMatchLabelRulesX(metric *dto.Metric, metricLabelValue string, matchLabel MatchLabel) {
+//	defaultAddLabels := matchLabel.DefaultLabelPairs
+//	matchedAnyRule := false
+//
+//	// Exact-value match using O(1) map lookup.
+//	if addLabels, found := matchLabel.MatchLabelValues[metricLabelValue]; found {
+//		matchedAnyRule = true
+//		if addLabels != nil {
+//			addExtendedLabels(addLabels.LabelPair, metric)
+//		}
+//	}
+//
+//	// Wildcard is independent of the exact match.
+//	if addLabels, found := matchLabel.MatchLabelValues["*"]; found {
+//		matchedAnyRule = true
+//		if addLabels != nil {
+//			addExtendedLabels(addLabels.LabelPair, metric)
+//		}
+//	}
+//
+//	// Add defaults once if any rule matched.
+//	if matchedAnyRule && defaultAddLabels != nil {
+//		addExtendedLabels(defaultAddLabels, metric)
+//	}
+//}
 
 // addExtendedLabels appends the given label pairs to the metric's labels, reserving space in advance to avoid repeated
 // reallocations.
-func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
+func addExtendedLabels(
+	labels []*dto.LabelPair,
+	metric *dto.Metric,
+) {
+	metric.Label = append(metric.Label, labels...)
+}
+
+func addExtendedLabelsX(defaultAddLabels map[string]string, metric *dto.Metric) {
 	// Reserve space once for this whole batch of labels to avoid repeated
 	// reallocations while appending one label at a time.
 	needed := len(defaultAddLabels)

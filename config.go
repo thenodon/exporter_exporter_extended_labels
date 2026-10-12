@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
 	yaml "gopkg.in/yaml.v3"
 )
 
@@ -88,15 +89,49 @@ type ExtendedLabel struct {
 	MatchLabels   []MatchLabel `yaml:"extended_labels"`
 }
 
-type MatchLabel struct {
+type MatchLabelX struct {
 	MetricMatch       *string                `yaml:"metric_match"`
 	MatchLabelValues  map[string]*LabelPairs `yaml:"match_label_key_values"`
 	DefaultLabelPairs map[string]string      `yaml:"default_label_pairs"`
 	metricMatchRegexp *regexp.Regexp
 }
 
+type LabelPairsX struct {
+	LabelPair map[string]string `yaml:"label_pairs"`
+}
+
+type MatchLabel struct {
+	MetricMatch       *string                `yaml:"metric_match"`
+	MatchLabelValues  map[string]*LabelPairs `yaml:"match_label_key_values"`
+	DefaultLabelPairs map[string]string      `yaml:"default_label_pairs"`
+	metricMatchRegexp *regexp.Regexp
+	// Compiled once during configuration loading.
+	compiledDefaultLabelPairs []*dto.LabelPair
+}
+
 type LabelPairs struct {
 	LabelPair map[string]string `yaml:"label_pairs"`
+	// Reusable, immutable protobuf label pairs.
+	compiledLabelPairs []*dto.LabelPair
+}
+
+func compileLabelPairs(labels map[string]string) []*dto.LabelPair {
+	if len(labels) == 0 {
+		return nil
+	}
+
+	pairs := make([]*dto.LabelPair, 0, len(labels))
+
+	for name, value := range labels {
+		n, v := name, value
+
+		pairs = append(pairs, &dto.LabelPair{
+			Name:  &n,
+			Value: &v,
+		})
+	}
+
+	return pairs
 }
 
 func (ee ExtendedLabelTarget) getMatchKeys() []string {
@@ -260,6 +295,54 @@ func (c httpConfig) getExtendedLabelConfig() (*ExtendedLabelsConfig, error) {
 }
 
 func (c *ExtendedLabelsConfig) compileMetricMatchers() error {
+	for targetName, target := range c.Targets {
+		for labelIndex := range target.Labels {
+			label := &target.Labels[labelIndex]
+
+			for matchLabelIndex := range label.MatchLabels {
+				matchLabel := &label.MatchLabels[matchLabelIndex]
+
+				// Compile the metric-name regex.
+				if matchLabel.MetricMatch != nil {
+					compiledRegex, err := regexp.Compile(
+						*matchLabel.MetricMatch,
+					)
+					if err != nil {
+						return fmt.Errorf(
+							"invalid metric_match regex for target %q label_key_name %q: %w",
+							targetName,
+							label.MatchLabelKey,
+							err,
+						)
+					}
+
+					matchLabel.metricMatchRegexp = compiledRegex
+				}
+
+				// Compile default labels.
+				matchLabel.compiledDefaultLabelPairs =
+					compileLabelPairs(matchLabel.DefaultLabelPairs)
+
+				// Compile exact-match and wildcard labels.
+				for _, labelPairs := range matchLabel.MatchLabelValues {
+					if labelPairs == nil {
+						continue
+					}
+
+					labelPairs.compiledLabelPairs =
+						compileLabelPairs(labelPairs.LabelPair)
+				}
+			}
+		}
+
+		// ExtendedLabelTarget is stored by value in the map.
+		c.Targets[targetName] = target
+	}
+
+	return nil
+}
+
+func (c *ExtendedLabelsConfig) compileMetricMatchersX() error {
 	for targetName, target := range c.Targets {
 		for labelIndex := range target.Labels {
 			label := &target.Labels[labelIndex]

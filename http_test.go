@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -15,6 +16,235 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 )
+
+func compileTargetForTest(
+	tb testing.TB,
+	target *ExtendedLabelTarget,
+) *ExtendedLabelTarget {
+	tb.Helper()
+
+	cfg := &ExtendedLabelsConfig{
+		Targets: map[string]ExtendedLabelTarget{
+			"test": *target,
+		},
+	}
+
+	if err := cfg.compileMetricMatchers(); err != nil {
+		tb.Fatalf("failed to compile test configuration: %v", err)
+	}
+
+	compiled := cfg.Targets["test"]
+	return &compiled
+}
+
+func testMetricFamily(
+	metricName string,
+	inputLabels map[string]string,
+) (*dto.MetricFamily, *dto.Metric) {
+	metricType := dto.MetricType_GAUGE
+	value := 1.0
+
+	metric := &dto.Metric{
+		Gauge: &dto.Gauge{Value: &value},
+	}
+
+	for name, labelValue := range inputLabels {
+		n, v := name, labelValue
+		metric.Label = append(metric.Label, &dto.LabelPair{
+			Name: &n, Value: &v,
+		})
+	}
+
+	return &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: []*dto.Metric{metric},
+	}, metric
+}
+
+func testLabelValues(metric *dto.Metric) map[string][]string {
+	result := make(map[string][]string)
+	for _, pair := range metric.Label {
+		result[pair.GetName()] = append(
+			result[pair.GetName()], pair.GetValue(),
+		)
+	}
+	return result
+}
+
+func TestManageExtendedLabelsMultipleRules(t *testing.T) {
+	metricName := "ifAdminStatus"
+	pattern := "^ifAdminStatus$"
+	otherPattern := "^node_cpu.*$"
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		rules  []ExtendedLabel
+		want   map[string][]string
+	}{
+		{
+			name: "multiple rules matching same key",
+			labels: map[string]string{
+				"ifDescr": "xe-0/2/3",
+			},
+			rules: []ExtendedLabel{{
+				MatchLabelKey: "ifDescr",
+				MatchLabels: []MatchLabel{
+					{
+						MetricMatch: &pattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"xe-0/2/3": {
+								LabelPair: map[string]string{
+									"neighbor": "sw1",
+								},
+							},
+						},
+						DefaultLabelPairs: map[string]string{
+							"source": "cdp",
+						},
+					},
+					{
+						MetricMatch: &pattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"*": {
+								LabelPair: map[string]string{
+									"scope": "network",
+								},
+							},
+						},
+						DefaultLabelPairs: map[string]string{
+							"discovery": "enabled",
+						},
+					},
+				},
+			}},
+			want: map[string][]string{
+				"neighbor":  {"sw1"},
+				"source":    {"cdp"},
+				"scope":     {"network"},
+				"discovery": {"enabled"},
+			},
+		},
+		{
+			name: "multiple matching label keys",
+			labels: map[string]string{
+				"ifDescr": "xe-0/2/3",
+				"device":  "router1",
+			},
+			rules: []ExtendedLabel{
+				{
+					MatchLabelKey: "ifDescr",
+					MatchLabels: []MatchLabel{{
+						MetricMatch: &pattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"xe-0/2/3": {
+								LabelPair: map[string]string{
+									"neighbor": "sw1",
+								},
+							},
+						},
+					}},
+				},
+				{
+					MatchLabelKey: "device",
+					MatchLabels: []MatchLabel{{
+						MetricMatch: &pattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"router1": {
+								LabelPair: map[string]string{
+									"site": "datacenter1",
+								},
+							},
+						},
+					}},
+				},
+			},
+			want: map[string][]string{
+				"neighbor": {"sw1"},
+				"site":     {"datacenter1"},
+			},
+		},
+		{
+			name: "only matching metric-name rule applies",
+			labels: map[string]string{
+				"ifDescr": "xe-0/2/3",
+			},
+			rules: []ExtendedLabel{{
+				MatchLabelKey: "ifDescr",
+				MatchLabels: []MatchLabel{
+					{
+						MetricMatch: &otherPattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"*": {
+								LabelPair: map[string]string{
+									"ignored": "yes",
+								},
+							},
+						},
+					},
+					{
+						MetricMatch: &pattern,
+						MatchLabelValues: map[string]*LabelPairs{
+							"*": {
+								LabelPair: map[string]string{
+									"accepted": "yes",
+								},
+							},
+						},
+					},
+				},
+			}},
+			want: map[string][]string{
+				"accepted": {"yes"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &ExtendedLabelsConfig{
+				Targets: map[string]ExtendedLabelTarget{
+					"test": {Labels: tt.rules},
+				},
+			}
+			if err := cfg.compileMetricMatchers(); err != nil {
+				t.Fatal(err)
+			}
+
+			target := cfg.Targets["test"]
+			mf, metric := testMetricFamily(metricName, tt.labels)
+
+			var out bytes.Buffer
+			if err := (&moduleConfig{}).manageExtendedLabels(
+				mf, &target, &out,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			got := testLabelValues(metric)
+			for name, expected := range tt.want {
+				actual := got[name]
+				if !reflect.DeepEqual(actual, expected) {
+					t.Errorf(
+						"label %q: got %v, want %v",
+						name, actual, expected,
+					)
+				}
+			}
+
+			// Verify no unexpected labels were introduced.
+			for name := range got {
+				if _, original := tt.labels[name]; original {
+					continue
+				}
+				if _, expected := tt.want[name]; !expected {
+					t.Errorf("unexpected label %q: %v", name, got[name])
+				}
+			}
+		})
+	}
+}
 
 func TestExtendedLabelTargetGetMatchKeys(t *testing.T) {
 	// This test verifies that match keys are collected without empty placeholders.
@@ -115,6 +345,7 @@ func TestManageExtendedLabelsAddsMatchingLabelsSnmpMetrics(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -162,6 +393,7 @@ func TestManageExtendedLabelsNoMatchSnmpMetrics(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -209,6 +441,7 @@ func TestManageExtendedLabelsAddsMatchingLabels(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -257,6 +490,7 @@ func TestManageExtendedLabelsSkipsNonMatchingMetricName(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -298,6 +532,7 @@ func TestManageExtendedLabelsAppliesWildcardRule(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -343,6 +578,7 @@ func TestManageExtendedLabelsAddsDefaultLabelsOnceWhenExactAndWildcardMatch(t *t
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -409,6 +645,7 @@ func TestManageExtendedLabelsHandlesMixedMetricLabelShapes(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -464,6 +701,7 @@ func TestManageExtendedLabelsHandlesNilLabelSliceAfterBinding(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -516,6 +754,7 @@ func TestManageExtendedLabelsBindsFromFirstUsableMetric(t *testing.T) {
 	}}}
 
 	var out bytes.Buffer
+	target = compileTargetForTest(t, target)
 	if err := (&moduleConfig{}).manageExtendedLabels(mf, target, &out); err != nil {
 		t.Fatalf("manageExtendedLabels returned error: %v", err)
 	}
@@ -526,6 +765,126 @@ func TestManageExtendedLabelsBindsFromFirstUsableMetric(t *testing.T) {
 	}
 	if labels["discovery"] != "CDP" {
 		t.Fatalf("expected second metric to be extended, got %#v", labels)
+	}
+}
+
+func buildMultiRuleBenchmarkFixture(
+	metricsCount int,
+	matchKeyCount int,
+	rulesPerKey int,
+) (*dto.MetricFamily, *ExtendedLabelTarget) {
+	metricName := "ifAdminStatus"
+	metricType := dto.MetricType_GAUGE
+	matchLabelName := "ifDescr"
+
+	metrics := make([]*dto.Metric, metricsCount)
+
+	for i := range metrics {
+		labelValue := fmt.Sprintf(
+			"xe-0/2/%d", i%matchKeyCount,
+		)
+		value := float64(i)
+
+		metrics[i] = &dto.Metric{
+			Label: []*dto.LabelPair{{
+				Name:  &matchLabelName,
+				Value: &labelValue,
+			}},
+			Gauge: &dto.Gauge{Value: &value},
+		}
+	}
+
+	rules := make([]MatchLabel, rulesPerKey)
+	metricPattern := "^ifAdminStatus$"
+
+	for r := range rules {
+		matchValues := make(
+			map[string]*LabelPairs, matchKeyCount+1,
+		)
+
+		for k := 0; k < matchKeyCount; k++ {
+			key := fmt.Sprintf("xe-0/2/%d", k)
+
+			matchValues[key] = &LabelPairs{
+				LabelPair: map[string]string{
+					fmt.Sprintf("neighbor_%d", r): "sw1",
+					fmt.Sprintf("remote_%d", r):   "xe-0/1/1",
+				},
+			}
+		}
+
+		matchValues["*"] = &LabelPairs{
+			LabelPair: map[string]string{
+				fmt.Sprintf("scope_%d", r): "all",
+			},
+		}
+
+		rules[r] = MatchLabel{
+			MetricMatch:      &metricPattern,
+			MatchLabelValues: matchValues,
+			DefaultLabelPairs: map[string]string{
+				fmt.Sprintf("discovery_%d", r): "CDP",
+			},
+		}
+	}
+
+	cfg := &ExtendedLabelsConfig{
+		Targets: map[string]ExtendedLabelTarget{
+			"test": {
+				Labels: []ExtendedLabel{{
+					MatchLabelKey: matchLabelName,
+					MatchLabels:   rules,
+				}},
+			},
+		},
+	}
+
+	if err := cfg.compileMetricMatchers(); err != nil {
+		panic(err)
+	}
+
+	target := cfg.Targets["test"]
+
+	return &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: metrics,
+	}, &target
+}
+
+func BenchmarkManageExtendedLabelsMultipleRules(b *testing.B) {
+	metricCounts := []int{100, 1000}
+	ruleCounts := []int{1, 2, 5, 10}
+
+	for _, metricsCount := range metricCounts {
+		for _, rulesCount := range ruleCounts {
+			name := fmt.Sprintf(
+				"metrics-%d-rules-%d",
+				metricsCount, rulesCount,
+			)
+
+			b.Run(name, func(b *testing.B) {
+				baseMF, target := buildMultiRuleBenchmarkFixture(
+					metricsCount, 10, rulesCount,
+				)
+
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					mf := cloneMetricFamilyForBenchmark(baseMF)
+					var out bytes.Buffer
+					b.StartTimer()
+
+					if err := (&moduleConfig{}).manageExtendedLabels(
+						mf, target, &out,
+					); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -551,6 +910,7 @@ func BenchmarkManageExtendedLabels(b *testing.B) {
 				metricFamily := cloneMetricFamilyForBenchmark(baseMetricFamily)
 				var out bytes.Buffer
 				b.StartTimer()
+				labelTarget = compileTargetForTest(b, labelTarget)
 				if err := (&moduleConfig{}).manageExtendedLabels(metricFamily, labelTarget, &out); err != nil {
 					b.Fatalf("manageExtendedLabels returned error: %v", err)
 				}
