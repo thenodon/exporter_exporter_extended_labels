@@ -131,7 +131,8 @@ func (cfg moduleConfig) getReverseProxyModifyResponseFunc() func(*http.Response)
 	}
 }
 
-// aha start
+// getLabelExtendReverseProxyModifyResponseFunc returns a function that modifies the response from the proxied server
+// by extending labels on metrics based on the configuration.
 func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*http.Response) error {
 	return func(resp *http.Response) error {
 		if resp.StatusCode != 200 {
@@ -212,17 +213,16 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 	}
 }
 
-func (cfg moduleConfig) manageExtendedLabels(
-	mf *dto.MetricFamily,
-	labelKeyNames *ExtendedLabelTarget,
-	out *bytes.Buffer,
-) error {
+// manageExtendedLabels applies the extended label rules to the given metric family and writes the modified metrics to
+// the output buffer.
+func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
 	// Bind and filter rules once per metric family, then apply to each metric.
 	boundLabels := bindExtendedLabelsForFamily(
 		mf.Metric,
 		labelKeyNames,
 		mf.GetName(),
 	)
+
 	for _, metric := range mf.Metric {
 		applyBoundLabelsToMetric(metric, boundLabels)
 	}
@@ -240,12 +240,11 @@ func (cfg moduleConfig) manageExtendedLabels(
 	return nil
 }
 
-func bindExtendedLabelsForFamily(
-	metrics []*dto.Metric,
-	labelKeyNames *ExtendedLabelTarget,
-	metricName string,
-) []boundExtendedLabel {
+// bindExtendedLabelsForFamily binds the extended label rules to the metrics in the given metric family,
+// returning a slice of boundExtendedLabel structs that can be applied to each metric.
+func bindExtendedLabelsForFamily(metrics []*dto.Metric, labelKeyNames *ExtendedLabelTarget, metricName string) []boundExtendedLabel {
 	firstMetricWithLabels := findFirstMetricWithLabels(metrics)
+
 	if firstMetricWithLabels == nil {
 		return nil
 	}
@@ -273,6 +272,7 @@ func bindExtendedLabelsForFamily(
 	return boundLabels
 }
 
+// findFirstMetricWithLabels returns the first metric in the given slice that has at least one label, or nil if none do.
 func findFirstMetricWithLabels(metrics []*dto.Metric) *dto.Metric {
 	for _, metric := range metrics {
 		if metric.Label != nil {
@@ -282,6 +282,7 @@ func findFirstMetricWithLabels(metrics []*dto.Metric) *dto.Metric {
 	return nil
 }
 
+// filterRulesForMetricName filters the given slice of MatchLabel rules to only those that match the given metric name.
 func filterRulesForMetricName(metricName string, rules []MatchLabel) []MatchLabel {
 	matchingRules := make([]MatchLabel, 0, len(rules))
 	for _, matchLabel := range rules {
@@ -292,6 +293,7 @@ func filterRulesForMetricName(metricName string, rules []MatchLabel) []MatchLabe
 	return matchingRules
 }
 
+// applyBoundLabelsToMetric applies the bound extended label rules to the given metric, modifying its labels in place.
 func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLabel) {
 	for _, bound := range boundLabels {
 		// Guard against different label slice lengths.
@@ -311,6 +313,8 @@ func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLab
 	}
 }
 
+// applyMatchLabelRules applies the label extension rules for a specific metric label value, adding any matching labels
+// to the metric.
 func applyMatchLabelRules(metric *dto.Metric, metricLabelValue string, matchLabel MatchLabel) {
 	defaultAddLabels := matchLabel.DefaultLabelPairs
 	matchedAnyRule := false
@@ -337,6 +341,8 @@ func applyMatchLabelRules(metric *dto.Metric, metricLabelValue string, matchLabe
 	}
 }
 
+// addExtendedLabels appends the given label pairs to the metric's labels, reserving space in advance to avoid repeated
+// reallocations.
 func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
 	// Reserve space once for this whole batch of labels to avoid repeated
 	// reallocations while appending one label at a time.
@@ -361,6 +367,7 @@ func addExtendedLabels(defaultAddLabels map[string]string, metric *dto.Metric) {
 	}
 }
 
+// matchMetricsName checks if the given metric name matches the MetricMatch pattern in the MatchLabel configuration.
 func matchMetricsName(name string, matchLabel *MatchLabel) bool {
 	if matchLabel == nil || matchLabel.MetricMatch == nil {
 		return true
