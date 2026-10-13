@@ -89,17 +89,6 @@ type ExtendedLabel struct {
 	MatchLabels   []MatchLabel `yaml:"extended_labels"`
 }
 
-type MatchLabelX struct {
-	MetricMatch       *string                `yaml:"metric_match"`
-	MatchLabelValues  map[string]*LabelPairs `yaml:"match_label_key_values"`
-	DefaultLabelPairs map[string]string      `yaml:"default_label_pairs"`
-	metricMatchRegexp *regexp.Regexp
-}
-
-type LabelPairsX struct {
-	LabelPair map[string]string `yaml:"label_pairs"`
-}
-
 type MatchLabel struct {
 	MetricMatch       *string                `yaml:"metric_match"`
 	MatchLabelValues  map[string]*LabelPairs `yaml:"match_label_key_values"`
