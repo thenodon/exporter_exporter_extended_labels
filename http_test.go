@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 )
@@ -768,6 +770,95 @@ func TestManageExtendedLabelsBindsFromFirstUsableMetric(t *testing.T) {
 	}
 }
 
+func TestApplyBoundLabelsImplementationsEquivalent(t *testing.T) {
+	testCases := []struct {
+		name      string
+		metrics   int
+		matchKeys int
+		rules     int
+	}{
+		{"single-rule", 10, 10, 1},
+		{"two-rules", 10, 10, 2},
+		{"five-rules", 10, 10, 5},
+		{"ten-rules", 10, 10, 10},
+		{"many-metrics", 1000, 10, 10},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture, target := buildMultiRuleBenchmarkFixture(
+				tc.metrics,
+				tc.matchKeys,
+				tc.rules,
+			)
+
+			// Independent copies of the same input.
+			oldFamily := proto.Clone(fixture).(*dto.MetricFamily)
+			newFamily := proto.Clone(fixture).(*dto.MetricFamily)
+
+			oldBound := bindExtendedLabelsForFamily(
+				oldFamily.Metric,
+				target,
+				oldFamily.GetName(),
+			)
+
+			newBound := bindExtendedLabelsForFamily(
+				newFamily.Metric,
+				target,
+				newFamily.GetName(),
+			)
+
+			// Original implementation.
+			for _, metric := range oldFamily.Metric {
+				applyBoundLabelsToMetricSequential(
+					metric,
+					oldBound,
+				)
+			}
+
+			// Optimization #3 implementation.
+			var pending [][]*dto.LabelPair
+
+			for _, metric := range newFamily.Metric {
+				applyBoundLabelsToMetricBatched(
+					metric,
+					newBound,
+					&pending,
+				)
+			}
+
+			// Compare the complete serialized output.
+			var oldOutput bytes.Buffer
+			var newOutput bytes.Buffer
+
+			if _, err := expfmt.MetricFamilyToText(
+				&oldOutput,
+				oldFamily,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := expfmt.MetricFamilyToText(
+				&newOutput,
+				newFamily,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			if !bytes.Equal(
+				oldOutput.Bytes(),
+				newOutput.Bytes(),
+			) {
+				t.Errorf(
+					"output differs between implementations\nold:\n%s\nnew:\n%s",
+					oldOutput.String(),
+					newOutput.String(),
+				)
+			}
+		})
+	}
+}
+
 func buildMultiRuleBenchmarkFixture(
 	metricsCount int,
 	matchKeyCount int,
@@ -1050,6 +1141,134 @@ func BenchmarkReverseProxyHandler(b *testing.B) {
 			b.Fatal("Response body is absent")
 		}
 	}
+}
+
+func BenchmarkManageExtendedLabelsProduction(b *testing.B) {
+	metricCounts := []int{100, 1000}
+	matchPercentages := []int{25, 50, 100}
+
+	for _, metricsCount := range metricCounts {
+		for _, matchPercent := range matchPercentages {
+			name := fmt.Sprintf(
+				"metrics-%d-match-%d",
+				metricsCount,
+				matchPercent,
+			)
+
+			b.Run(name, func(b *testing.B) {
+				baseMF, target := buildProductionBenchmarkFixture(
+					metricsCount,
+					matchPercent,
+				)
+
+				b.ReportAllocs()
+				b.ResetTimer()
+
+				for i := 0; i < b.N; i++ {
+					b.StopTimer()
+					mf := cloneMetricFamilyForBenchmark(baseMF)
+					var out bytes.Buffer
+					b.StartTimer()
+
+					if err := (&moduleConfig{}).manageExtendedLabels(
+						mf, target, &out,
+					); err != nil {
+						b.Fatal(err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func buildProductionBenchmarkFixture(
+	metricsCount int,
+	matchPercent int,
+) (*dto.MetricFamily, *ExtendedLabelTarget) {
+	const interfaceCount = 36
+
+	metricName := "ifAdminStatus"
+	metricType := dto.MetricType_GAUGE
+	matchLabelName := "ifDescr"
+	metricPattern := "^ifAdminStatus$"
+
+	interfaceNames := make([]string, interfaceCount)
+	matchValues := make(map[string]*LabelPairs, interfaceCount)
+
+	for i := 0; i < interfaceCount; i++ {
+		interfaceName := fmt.Sprintf(
+			"TwentyFiveGigE2/0/%d", i+1,
+		)
+		interfaceNames[i] = interfaceName
+
+		discovery := "CDP"
+		if i%3 == 0 {
+			discovery = "LLDP"
+		}
+
+		matchValues[interfaceName] = &LabelPairs{
+			LabelPair: map[string]string{
+				"discovery": discovery,
+				"neighbor": fmt.Sprintf(
+					"switch-%d.net.example", i+1,
+				),
+				"remote_interface": fmt.Sprintf(
+					"TenGigabitEthernet1/1/%d", i+1,
+				),
+			},
+		}
+	}
+
+	metrics := make([]*dto.Metric, metricsCount)
+
+	for i := range metrics {
+		var interfaceName string
+
+		// Deterministic distribution of matching interfaces.
+		if i%100 < matchPercent {
+			interfaceName = interfaceNames[i%interfaceCount]
+		} else {
+			interfaceName = fmt.Sprintf(
+				"UnmappedInterface%d", i,
+			)
+		}
+
+		value := float64(i)
+
+		metrics[i] = &dto.Metric{
+			Label: []*dto.LabelPair{{
+				Name:  &matchLabelName,
+				Value: &interfaceName,
+			}},
+			Gauge: &dto.Gauge{Value: &value},
+		}
+	}
+
+	cfg := &ExtendedLabelsConfig{
+		Targets: map[string]ExtendedLabelTarget{
+			"device-a": {
+				Labels: []ExtendedLabel{{
+					MatchLabelKey: matchLabelName,
+					MatchLabels: []MatchLabel{{
+						MetricMatch:      &metricPattern,
+						MatchLabelValues: matchValues,
+					}},
+				}},
+			},
+		},
+	}
+
+	if err := cfg.compileMetricMatchers(); err != nil {
+		panic(err)
+	}
+
+	target := cfg.Targets["device-a"]
+
+	return &dto.MetricFamily{
+		Name:   &metricName,
+		Type:   &metricType,
+		Metric: metrics,
+	}, &target
 }
 
 // genRandomMetricsResponse generates http response body which contains random set of

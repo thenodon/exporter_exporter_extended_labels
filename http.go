@@ -213,6 +213,14 @@ func (cfg moduleConfig) getLabelExtendReverseProxyModifyResponseFunc() func(*htt
 	}
 }
 
+func countBoundRules(boundLabels []boundExtendedLabel) int {
+	count := 0
+	for _, bound := range boundLabels {
+		count += len(bound.matchLabels)
+	}
+	return count
+}
+
 // manageExtendedLabels applies the extended label rules to the given metric family and writes the modified metrics to
 // the output buffer.
 func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames *ExtendedLabelTarget, out *bytes.Buffer) error {
@@ -222,11 +230,30 @@ func (cfg moduleConfig) manageExtendedLabels(mf *dto.MetricFamily, labelKeyNames
 		labelKeyNames,
 		mf.GetName(),
 	)
+	if countBoundRules(boundLabels) <= 1 {
+		// Fast path: existing implementation.
+		for _, metric := range mf.Metric {
+			applyBoundLabelsToMetricSequential(metric, boundLabels)
+		}
+	} else {
+		// Optimized path: reserve capacity once per metric.
+		var pending [][]*dto.LabelPair
 
-	for _, metric := range mf.Metric {
-		applyBoundLabelsToMetric(metric, boundLabels)
+		for _, metric := range mf.Metric {
+			applyBoundLabelsToMetricBatched(metric, boundLabels, &pending)
+		}
 	}
+	/*
+			for _, metric := range mf.Metric {
+				applyBoundLabelsToMetric(metric, boundLabels)
+			}
 
+		var pending [][]*dto.LabelPair
+
+		for _, metric := range mf.Metric {
+			applyBoundLabelsToMetric(metric, boundLabels, &pending)
+		}
+	*/
 	// Serialize the complete metric family.
 	_, err := expfmt.MetricFamilyToText(out, mf)
 	if err != nil {
@@ -293,8 +320,10 @@ func filterRulesForMetricName(metricName string, rules []MatchLabel) []MatchLabe
 	return matchingRules
 }
 
-// applyBoundLabelsToMetric applies the bound extended label rules to the given metric, modifying its labels in place.
-func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLabel) {
+func applyBoundLabelsToMetricSequential(
+	metric *dto.Metric,
+	boundLabels []boundExtendedLabel,
+) {
 	for _, bound := range boundLabels {
 		// Guard against different label slice lengths.
 		if bound.labelIndex >= len(metric.Label) {
@@ -307,9 +336,99 @@ func applyBoundLabelsToMetric(metric *dto.Metric, boundLabels []boundExtendedLab
 		}
 
 		metricLabelValue := matchLabelPair.GetValue()
+
 		for _, matchLabel := range bound.matchLabels {
 			applyMatchLabelRules(metric, metricLabelValue, matchLabel)
 		}
+	}
+}
+
+// applyBoundLabelsToMetricBatched applies the bound extended label rules to the given metric, modifying its labels in place.
+func applyBoundLabelsToMetricBatched(
+	metric *dto.Metric,
+	boundLabels []boundExtendedLabel,
+	pending *[][]*dto.LabelPair,
+) {
+	// Reuse the temporary slice from the previous metric.
+	additions := (*pending)[:0]
+	totalNeeded := 0
+
+	for _, bound := range boundLabels {
+		if bound.labelIndex >= len(metric.Label) {
+			continue
+		}
+
+		matchLabelPair := metric.Label[bound.labelIndex]
+		if matchLabelPair == nil {
+			continue
+		}
+
+		metricLabelValue := matchLabelPair.GetValue()
+
+		for i := range bound.matchLabels {
+			rule := &bound.matchLabels[i]
+
+			var exactLabels []*dto.LabelPair
+			var wildcardLabels []*dto.LabelPair
+			var defaultLabels []*dto.LabelPair
+
+			matchedAnyRule := false
+
+			if pair, found := rule.MatchLabelValues[metricLabelValue]; found {
+				matchedAnyRule = true
+				if pair != nil {
+					exactLabels = pair.compiledLabelPairs
+				}
+			}
+
+			if pair, found := rule.MatchLabelValues["*"]; found {
+				matchedAnyRule = true
+				if pair != nil {
+					wildcardLabels = pair.compiledLabelPairs
+				}
+			}
+
+			if matchedAnyRule {
+				defaultLabels = rule.compiledDefaultLabelPairs
+			}
+
+			// Preserve existing append order:
+			// exact, wildcard, defaults, then next rule.
+			if len(exactLabels) > 0 {
+				additions = append(additions, exactLabels)
+				totalNeeded += len(exactLabels)
+			}
+			if len(wildcardLabels) > 0 {
+				additions = append(additions, wildcardLabels)
+				totalNeeded += len(wildcardLabels)
+			}
+			if len(defaultLabels) > 0 {
+				additions = append(additions, defaultLabels)
+				totalNeeded += len(defaultLabels)
+			}
+		}
+	}
+
+	// Retain any grown scratch capacity for the next metric.
+	*pending = additions
+
+	if totalNeeded == 0 {
+		return
+	}
+
+	// Reserve capacity once for all matching rules.
+	if cap(metric.Label)-len(metric.Label) < totalNeeded {
+		grown := make(
+			[]*dto.LabelPair,
+			len(metric.Label),
+			len(metric.Label)+totalNeeded,
+		)
+		copy(grown, metric.Label)
+		metric.Label = grown
+	}
+
+	for _, labels := range additions {
+		metric.Label = append(metric.Label, labels...)
 	}
 }
 
