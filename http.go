@@ -531,30 +531,6 @@ func addExtendedLabels(
 	metric.Label = append(metric.Label, labels...)
 }
 
-func addExtendedLabelsX(defaultAddLabels map[string]string, metric *dto.Metric) {
-	// Reserve space once for this whole batch of labels to avoid repeated
-	// reallocations while appending one label at a time.
-	needed := len(defaultAddLabels)
-	if needed == 0 {
-		return
-	}
-	if available := cap(metric.Label) - len(metric.Label); available < needed {
-		grown := make([]*dto.LabelPair, len(metric.Label), len(metric.Label)+needed)
-		copy(grown, metric.Label)
-		metric.Label = grown
-	}
-
-	for addLabelKey, addLabelValue := range defaultAddLabels {
-		k := addLabelKey
-		v := addLabelValue
-		var label = dto.LabelPair{
-			Name:  &k,
-			Value: &v,
-		}
-		metric.Label = append(metric.Label, &label)
-	}
-}
-
 // matchMetricsName checks if the given metric name matches the MetricMatch pattern in the MatchLabel configuration.
 func matchMetricsName(name string, matchLabel *MatchLabel) bool {
 	if matchLabel == nil || matchLabel.MetricMatch == nil {
