@@ -4,10 +4,13 @@ on:
   release:
     types: [created]
 
+permissions:
+  contents: write
+
 jobs:
   release-linux-amd64:
     name: release linux/amd64
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         goos: [ linux, darwin,  windows]
@@ -24,7 +27,7 @@ jobs:
       run: echo "RELEASE_VERSION=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
     - uses: wangyoucao577/go-release-action@v1
       with:
-        github_token: ${{ secrets.GH_TOKEN }}
+        github_token: ${{ github.token }}
         goos: ${{ matrix.goos }}
         goarch: ${{ matrix.goarch }}
         goversion: "1.20"
